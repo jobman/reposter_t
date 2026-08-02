@@ -1,0 +1,24 @@
+[Unit]
+Description=Telegram Reposter Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nebula
+Group=nebula
+WorkingDirectory=/home/nebula/apps/reposter_t/current
+EnvironmentFile=/home/nebula/apps/reposter_t/shared/.env
+ExecStart=/home/nebula/apps/reposter_t/current/.venv/bin/python -m reposter_bot
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/nebula/apps/reposter_t/shared/data
+
+[Install]
+WantedBy=multi-user.target
+
