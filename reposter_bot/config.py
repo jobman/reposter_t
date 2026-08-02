@@ -40,6 +40,7 @@ class Settings:
     posting_enabled: bool
     target_chat_id: int | None
     join_url: str
+    link_text: str
     timezone: ZoneInfo
     window_start: time
     window_end: time
@@ -69,6 +70,9 @@ class Settings:
         join_url = os.getenv("JOIN_URL", "https://t.me/+Ucj6avweaLNmMDNi").strip()
         if not join_url.startswith(("https://t.me/", "http://t.me/")):
             raise ValueError("JOIN_URL must be a Telegram HTTP(S) URL")
+        link_text = os.getenv("LINK_TEXT", "Toy 🖤").strip()
+        if not link_text:
+            raise ValueError("LINK_TEXT must not be empty")
 
         return cls(
             bot_token=token,
@@ -78,6 +82,7 @@ class Settings:
             ),
             target_chat_id=target_chat_id,
             join_url=join_url,
+            link_text=link_text,
             timezone=timezone,
             window_start=parse_clock(os.getenv("WINDOW_START", "19:00")),
             window_end=parse_clock(os.getenv("WINDOW_END", "02:00")),

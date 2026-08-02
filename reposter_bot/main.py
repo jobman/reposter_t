@@ -27,7 +27,7 @@ async def main() -> None:
     bot = Bot(settings.bot_token)
     dispatcher = Dispatcher()
     dispatcher.include_router(build_router(database, settings))
-    publisher = Publisher(bot, settings.join_url)
+    publisher = Publisher(bot, settings.join_url, settings.link_text)
 
     await bot.delete_webhook(drop_pending_updates=False)
     await bot.set_my_commands(

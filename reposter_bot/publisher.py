@@ -15,9 +15,9 @@ from reposter_bot.database import MediaRecord, QueueItem
 
 
 class Publisher:
-    def __init__(self, bot: Bot, join_url: str) -> None:
+    def __init__(self, bot: Bot, join_url: str, link_text: str) -> None:
         self.bot = bot
-        self.caption = f'<a href="{escape(join_url, quote=True)}">join</a>'
+        self.caption = f'<a href="{escape(join_url, quote=True)}">{escape(link_text)}</a>'
 
     async def publish(self, target_chat_id: int, item: QueueItem) -> None:
         if not item.media:
