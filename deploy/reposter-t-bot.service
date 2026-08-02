@@ -1,5 +1,5 @@
 [Unit]
-Description=Telegram Reposter Bot
+Description=reposter_t Telegram Bot
 After=network-online.target
 Wants=network-online.target
 
@@ -21,4 +21,3 @@ ReadWritePaths=/home/nebula/apps/reposter_t/shared/data
 
 [Install]
 WantedBy=multi-user.target
-

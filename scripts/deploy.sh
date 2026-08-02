@@ -32,8 +32,10 @@ ln -sfn "$SHARED_DIR/data" "$RELEASE_DIR/data"
 ln -sfn "$RELEASE_DIR" "$APP_ROOT/current.next"
 mv -Tf "$APP_ROOT/current.next" "$APP_ROOT/current"
 
-sudo install -m 0644 "$RELEASE_DIR/deploy/reposter-bot.service" /etc/systemd/system/reposter-bot.service
+sudo install -m 0644 \
+  "$RELEASE_DIR/deploy/reposter-t-bot.service" \
+  /etc/systemd/system/reposter-t-bot.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now reposter-bot.service
-sudo systemctl restart reposter-bot.service
-sudo systemctl --no-pager --full status reposter-bot.service
+sudo systemctl enable --now reposter-t-bot.service
+sudo systemctl restart reposter-t-bot.service
+sudo systemctl --no-pager --full status reposter-t-bot.service

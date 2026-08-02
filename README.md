@@ -54,4 +54,4 @@ Workflow `.github/workflows/deploy.yml` запускается при каждо
 self-hosted runner. Сначала выполняются lint и тесты, затем создаётся отдельный release,
 атомарно обновляется ссылка `current` и перезапускается systemd-сервис. Файл `.env` и
 SQLite находятся в `/home/nebula/apps/reposter_t/shared` и не меняются деплоем.
-
+Имя unit-файла — `reposter-t-bot.service`.
