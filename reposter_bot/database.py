@@ -13,6 +13,7 @@ import aiosqlite
 class MediaRecord:
     kind: str
     file_id: str
+    local_path: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,24 @@ class QueueItem:
     id: int
     media: tuple[MediaRecord, ...]
     attempts: int
+    is_suggestion: bool = False
+    text_content: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Suggestion:
+    id: int
+    submitter_user_id: int
+    submitter_chat_id: int
+    submitter_username: str | None
+    submitter_name: str
+    source_message_id: int
+    source_text: str | None
+    status: str
+    review_message_id: int | None
+    reason_prompt_message_id: int | None
+    media: tuple[MediaRecord, ...]
+    source_message_ids: tuple[int, ...]
 
 
 def utc_now_text() -> str:
@@ -56,7 +75,9 @@ class Database:
                     CHECK(status IN ('queued', 'publishing', 'published')),
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
-                published_at TEXT
+                published_at TEXT,
+                is_suggestion INTEGER NOT NULL DEFAULT 0,
+                text_content TEXT
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS uq_queue_single_source
@@ -72,6 +93,7 @@ class Database:
                 position INTEGER NOT NULL,
                 kind TEXT NOT NULL,
                 file_id TEXT NOT NULL,
+                local_path TEXT,
                 UNIQUE(item_id, position)
             );
 
@@ -94,8 +116,46 @@ class Database:
                 error TEXT,
                 completed_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                submitter_user_id INTEGER NOT NULL,
+                submitter_chat_id INTEGER NOT NULL,
+                submitter_username TEXT,
+                submitter_name TEXT NOT NULL,
+                source_message_id INTEGER NOT NULL,
+                source_text TEXT,
+                media_group_id TEXT,
+                status TEXT NOT NULL
+                    CHECK(status IN (
+                        'collecting', 'pending', 'processing', 'approved',
+                        'awaiting_reason', 'declined'
+                    )),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                review_message_id INTEGER,
+                reason_prompt_message_id INTEGER,
+                decline_reason TEXT,
+                queue_item_id INTEGER REFERENCES queue_items(id)
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_collecting_suggestion_album
+                ON suggestions(submitter_chat_id, media_group_id)
+                WHERE media_group_id IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS suggestion_media (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                suggestion_id INTEGER NOT NULL REFERENCES suggestions(id) ON DELETE CASCADE,
+                source_message_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                UNIQUE(suggestion_id, source_message_id)
+            );
             """
         )
+        await self._ensure_column("queue_items", "is_suggestion", "INTEGER NOT NULL DEFAULT 0")
+        await self._ensure_column("queue_items", "text_content", "TEXT")
+        await self._ensure_column("queue_media", "local_path", "TEXT")
         await self.connection.execute(
             "UPDATE queue_items SET status = 'queued' WHERE status = 'publishing'"
         )
@@ -103,6 +163,14 @@ class Database:
             "INSERT OR IGNORE INTO settings(key, value) VALUES ('paused', 'true')"
         )
         await self.connection.commit()
+
+    async def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        connection = self._connection()
+        cursor = await connection.execute(f"PRAGMA table_info({table})")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        if column not in {str(row["name"]) for row in rows}:
+            await connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def close(self) -> None:
         if self.connection is not None:
@@ -279,9 +347,9 @@ class Database:
         cursor = await self._connection().execute(
             """
             SELECT qi.id, qi.created_at, qi.attempts, COUNT(qm.id) AS media_count,
-                   GROUP_CONCAT(DISTINCT qm.kind) AS kinds
+                   COALESCE(GROUP_CONCAT(DISTINCT qm.kind), 'text') AS kinds
             FROM queue_items qi
-            JOIN queue_media qm ON qm.item_id = qi.id
+            LEFT JOIN queue_media qm ON qm.item_id = qi.id
             WHERE qi.status = 'queued'
             GROUP BY qi.id
             ORDER BY qi.id
@@ -301,11 +369,330 @@ class Database:
             await self._connection().commit()
             return cursor.rowcount == 1
 
+    async def create_suggestion(
+        self,
+        *,
+        submitter_user_id: int,
+        submitter_chat_id: int,
+        submitter_username: str | None,
+        submitter_name: str,
+        source_message_id: int,
+        source_text: str | None,
+        media: MediaRecord | None,
+    ) -> int:
+        async with self._write_lock:
+            connection = self._connection()
+            now = utc_now_text()
+            cursor = await connection.execute(
+                """
+                INSERT INTO suggestions(
+                    submitter_user_id, submitter_chat_id, submitter_username,
+                    submitter_name, source_message_id, source_text, status,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (
+                    submitter_user_id,
+                    submitter_chat_id,
+                    submitter_username,
+                    submitter_name,
+                    source_message_id,
+                    source_text,
+                    now,
+                    now,
+                ),
+            )
+            suggestion_id = int(cursor.lastrowid)
+            if media is not None:
+                await connection.execute(
+                    """
+                    INSERT INTO suggestion_media(
+                        suggestion_id, source_message_id, kind, file_id
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (suggestion_id, source_message_id, media.kind, media.file_id),
+                )
+            await connection.commit()
+            return suggestion_id
+
+    async def add_suggestion_album_part(
+        self,
+        *,
+        submitter_user_id: int,
+        submitter_chat_id: int,
+        submitter_username: str | None,
+        submitter_name: str,
+        source_message_id: int,
+        source_text: str | None,
+        media_group_id: str,
+        media: MediaRecord,
+    ) -> tuple[int, bool]:
+        async with self._write_lock:
+            connection = self._connection()
+            existing = await connection.execute(
+                """
+                SELECT id FROM suggestions
+                WHERE submitter_chat_id = ? AND media_group_id = ?
+                """,
+                (submitter_chat_id, media_group_id),
+            )
+            row = await existing.fetchone()
+            await existing.close()
+            now = utc_now_text()
+            created = row is None
+            if row is None:
+                cursor = await connection.execute(
+                    """
+                    INSERT INTO suggestions(
+                        submitter_user_id, submitter_chat_id, submitter_username,
+                        submitter_name, source_message_id, source_text, media_group_id,
+                        status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'collecting', ?, ?)
+                    """,
+                    (
+                        submitter_user_id,
+                        submitter_chat_id,
+                        submitter_username,
+                        submitter_name,
+                        source_message_id,
+                        source_text,
+                        media_group_id,
+                        now,
+                        now,
+                    ),
+                )
+                suggestion_id = int(cursor.lastrowid)
+            else:
+                suggestion_id = int(row["id"])
+                await connection.execute(
+                    """
+                    UPDATE suggestions
+                    SET updated_at = ?, source_text = COALESCE(source_text, ?)
+                    WHERE id = ? AND status = 'collecting'
+                    """,
+                    (now, source_text, suggestion_id),
+                )
+            await connection.execute(
+                """
+                INSERT OR IGNORE INTO suggestion_media(
+                    suggestion_id, source_message_id, kind, file_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (suggestion_id, source_message_id, media.kind, media.file_id),
+            )
+            await connection.commit()
+            return suggestion_id, created
+
+    async def finalize_suggestion_albums(self, cutoff: datetime) -> list[int]:
+        async with self._write_lock:
+            connection = self._connection()
+            cursor = await connection.execute(
+                """
+                SELECT id FROM suggestions
+                WHERE status = 'collecting' AND updated_at <= ?
+                ORDER BY id
+                """,
+                (cutoff.isoformat(),),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            suggestion_ids = [int(row["id"]) for row in rows]
+            if suggestion_ids:
+                await connection.executemany(
+                    "UPDATE suggestions SET status = 'pending', updated_at = ? WHERE id = ?",
+                    [(utc_now_text(), suggestion_id) for suggestion_id in suggestion_ids],
+                )
+                await connection.commit()
+            return suggestion_ids
+
+    async def pending_unreviewed_suggestions(self, limit: int = 10) -> list[int]:
+        cursor = await self._connection().execute(
+            """
+            SELECT id FROM suggestions
+            WHERE status = 'pending' AND review_message_id IS NULL
+            ORDER BY id LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [int(row["id"]) for row in rows]
+
+    async def get_suggestion(self, suggestion_id: int) -> Suggestion | None:
+        cursor = await self._connection().execute(
+            "SELECT * FROM suggestions WHERE id = ?", (suggestion_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        media_cursor = await self._connection().execute(
+            """
+            SELECT source_message_id, kind, file_id
+            FROM suggestion_media WHERE suggestion_id = ?
+            ORDER BY source_message_id
+            """,
+            (suggestion_id,),
+        )
+        media_rows = await media_cursor.fetchall()
+        await media_cursor.close()
+        return Suggestion(
+            id=int(row["id"]),
+            submitter_user_id=int(row["submitter_user_id"]),
+            submitter_chat_id=int(row["submitter_chat_id"]),
+            submitter_username=(
+                str(row["submitter_username"]) if row["submitter_username"] else None
+            ),
+            submitter_name=str(row["submitter_name"]),
+            source_message_id=int(row["source_message_id"]),
+            source_text=str(row["source_text"]) if row["source_text"] else None,
+            status=str(row["status"]),
+            review_message_id=(int(row["review_message_id"]) if row["review_message_id"] else None),
+            reason_prompt_message_id=(
+                int(row["reason_prompt_message_id"]) if row["reason_prompt_message_id"] else None
+            ),
+            media=tuple(
+                MediaRecord(kind=str(media["kind"]), file_id=str(media["file_id"]))
+                for media in media_rows
+            ),
+            source_message_ids=tuple(int(media["source_message_id"]) for media in media_rows)
+            or (int(row["source_message_id"]),),
+        )
+
+    async def set_suggestion_review_message(
+        self, suggestion_id: int, review_message_id: int
+    ) -> None:
+        async with self._write_lock:
+            await self._connection().execute(
+                "UPDATE suggestions SET review_message_id = ?, updated_at = ? WHERE id = ?",
+                (review_message_id, utc_now_text(), suggestion_id),
+            )
+            await self._connection().commit()
+
+    async def begin_suggestion_approval(self, suggestion_id: int) -> bool:
+        async with self._write_lock:
+            cursor = await self._connection().execute(
+                "UPDATE suggestions SET status = 'processing', updated_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (utc_now_text(), suggestion_id),
+            )
+            await self._connection().commit()
+            return cursor.rowcount == 1
+
+    async def reset_suggestion_pending(self, suggestion_id: int) -> None:
+        async with self._write_lock:
+            await self._connection().execute(
+                "UPDATE suggestions SET status = 'pending', updated_at = ? "
+                "WHERE id = ? AND status = 'processing'",
+                (utc_now_text(), suggestion_id),
+            )
+            await self._connection().commit()
+
+    async def begin_suggestion_decline(self, suggestion_id: int) -> bool:
+        async with self._write_lock:
+            cursor = await self._connection().execute(
+                "UPDATE suggestions SET status = 'awaiting_reason', updated_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (utc_now_text(), suggestion_id),
+            )
+            await self._connection().commit()
+            return cursor.rowcount == 1
+
+    async def set_suggestion_reason_prompt(
+        self, suggestion_id: int, prompt_message_id: int
+    ) -> None:
+        async with self._write_lock:
+            await self._connection().execute(
+                "UPDATE suggestions SET reason_prompt_message_id = ?, updated_at = ? WHERE id = ?",
+                (prompt_message_id, utc_now_text(), suggestion_id),
+            )
+            await self._connection().commit()
+
+    async def suggestion_awaiting_prompt(self, prompt_message_id: int) -> Suggestion | None:
+        cursor = await self._connection().execute(
+            "SELECT id FROM suggestions WHERE reason_prompt_message_id = ? "
+            "AND status = 'awaiting_reason'",
+            (prompt_message_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return await self.get_suggestion(int(row["id"])) if row else None
+
+    async def mark_suggestion_declined(self, suggestion_id: int, reason: str) -> bool:
+        async with self._write_lock:
+            cursor = await self._connection().execute(
+                "UPDATE suggestions SET status = 'declined', decline_reason = ?, updated_at = ? "
+                "WHERE id = ? AND status = 'awaiting_reason'",
+                (reason[:2000], utc_now_text(), suggestion_id),
+            )
+            await self._connection().commit()
+            return cursor.rowcount == 1
+
+    async def enqueue_approved_suggestion(
+        self, suggestion_id: int, local_media: tuple[MediaRecord, ...]
+    ) -> int:
+        async with self._write_lock:
+            connection = self._connection()
+            cursor = await connection.execute(
+                "SELECT source_text, status FROM suggestions WHERE id = ?",
+                (suggestion_id,),
+            )
+            suggestion = await cursor.fetchone()
+            await cursor.close()
+            if suggestion is None or suggestion["status"] != "processing":
+                raise ValueError("Suggestion is not being approved")
+            text_content = (
+                str(suggestion["source_text"])
+                if suggestion["source_text"] and not local_media
+                else None
+            )
+            queue_cursor = await connection.execute(
+                """
+                INSERT INTO queue_items(
+                    source_chat_id, source_message_id, media_group_id, created_at,
+                    status, is_suggestion, text_content
+                ) VALUES (0, ?, ?, ?, 'queued', 1, ?)
+                """,
+                (
+                    suggestion_id,
+                    f"suggestion:{suggestion_id}",
+                    utc_now_text(),
+                    text_content,
+                ),
+            )
+            queue_item_id = int(queue_cursor.lastrowid)
+            if local_media:
+                await connection.executemany(
+                    """
+                    INSERT INTO queue_media(
+                        item_id, position, kind, file_id, local_path
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            queue_item_id,
+                            position,
+                            media.kind,
+                            media.file_id,
+                            media.local_path,
+                        )
+                        for position, media in enumerate(local_media)
+                    ],
+                )
+            await connection.execute(
+                "UPDATE suggestions SET status = 'approved', queue_item_id = ?, updated_at = ? "
+                "WHERE id = ?",
+                (queue_item_id, utc_now_text(), suggestion_id),
+            )
+            await connection.commit()
+            return queue_item_id
+
     async def claim_next_item(self) -> QueueItem | None:
         async with self._write_lock:
             connection = self._connection()
             cursor = await connection.execute(
-                "SELECT id, attempts FROM queue_items WHERE status = 'queued' ORDER BY id LIMIT 1"
+                "SELECT id, attempts, is_suggestion, text_content FROM queue_items "
+                "WHERE status = 'queued' ORDER BY id LIMIT 1"
             )
             row = await cursor.fetchone()
             await cursor.close()
@@ -320,7 +707,8 @@ class Database:
                 await connection.rollback()
                 return None
             media_cursor = await connection.execute(
-                "SELECT kind, file_id FROM queue_media WHERE item_id = ? ORDER BY position",
+                "SELECT kind, file_id, local_path FROM queue_media "
+                "WHERE item_id = ? ORDER BY position",
                 (item_id,),
             )
             media_rows = await media_cursor.fetchall()
@@ -329,8 +717,14 @@ class Database:
             return QueueItem(
                 id=item_id,
                 attempts=int(row["attempts"]),
+                is_suggestion=bool(row["is_suggestion"]),
+                text_content=str(row["text_content"]) if row["text_content"] else None,
                 media=tuple(
-                    MediaRecord(kind=str(media["kind"]), file_id=str(media["file_id"]))
+                    MediaRecord(
+                        kind=str(media["kind"]),
+                        file_id=str(media["file_id"]),
+                        local_path=(str(media["local_path"]) if media["local_path"] else None),
+                    )
                     for media in media_rows
                 ),
             )

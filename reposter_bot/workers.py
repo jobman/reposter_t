@@ -4,15 +4,30 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from aiogram import Bot
 
 from reposter_bot.config import Settings, parse_clock
-from reposter_bot.database import Database
+from reposter_bot.database import Database, QueueItem
 from reposter_bot.publisher import Publisher
 from reposter_bot.scheduling import ScheduleConfig, active_slot
 
 logger = logging.getLogger(__name__)
+
+
+def cleanup_local_media(item: QueueItem) -> None:
+    parents: set[Path] = set()
+    for media in item.media:
+        if media.local_path:
+            path = Path(media.local_path)
+            path.unlink(missing_ok=True)
+            parents.add(path.parent)
+    for parent in parents:
+        try:
+            parent.rmdir()
+        except OSError:
+            pass
 
 
 async def runtime_schedule(database: Database, settings: Settings) -> ScheduleConfig:
@@ -95,6 +110,7 @@ async def scheduler_worker(
             else:
                 await database.mark_published(item.id)
                 await database.finish_slot(slot.key, "published", item.id)
+                cleanup_local_media(item)
                 logger.info("Published queue item %s to chat %s", item.id, target_chat_id)
         except asyncio.CancelledError:
             raise

@@ -37,10 +37,15 @@ def parse_admin_ids(value: str) -> frozenset[int]:
 class Settings:
     bot_token: str
     setup_secret: str
+    suggestion_bot_token: str
+    suggestion_admin_id: int
     posting_enabled: bool
     target_chat_id: int | None
     join_url: str
     link_text: str
+    suggestion_bot_url: str
+    suggestion_link_text: str
+    suggestion_media_path: Path
     timezone: ZoneInfo
     window_start: time
     window_end: time
@@ -73,16 +78,29 @@ class Settings:
         link_text = os.getenv("LINK_TEXT", "Toy 🖤").strip()
         if not link_text:
             raise ValueError("LINK_TEXT must not be empty")
+        suggestion_bot_url = os.getenv(
+            "SUGGESTION_BOT_URL", "https://t.me/toy_predlozhka_bot"
+        ).strip()
+        if not suggestion_bot_url.startswith(("https://t.me/", "http://t.me/")):
+            raise ValueError("SUGGESTION_BOT_URL must be a Telegram HTTP(S) URL")
+        suggestion_link_text = os.getenv("SUGGESTION_LINK_TEXT", "Предложка").strip()
+        if not suggestion_link_text:
+            raise ValueError("SUGGESTION_LINK_TEXT must not be empty")
 
         return cls(
             bot_token=token,
             setup_secret=os.getenv("SETUP_SECRET", "").strip(),
+            suggestion_bot_token=os.getenv("SUGGESTION_BOT_TOKEN", "").strip(),
+            suggestion_admin_id=int(os.getenv("SUGGESTION_ADMIN_ID", "192884752")),
             posting_enabled=parse_bool(
                 os.getenv("POSTING_ENABLED", "false"), name="POSTING_ENABLED"
             ),
             target_chat_id=target_chat_id,
             join_url=join_url,
             link_text=link_text,
+            suggestion_bot_url=suggestion_bot_url,
+            suggestion_link_text=suggestion_link_text,
+            suggestion_media_path=Path(os.getenv("SUGGESTION_MEDIA_PATH", "data/suggestions")),
             timezone=timezone,
             window_start=parse_clock(os.getenv("WINDOW_START", "19:00")),
             window_end=parse_clock(os.getenv("WINDOW_END", "02:00")),

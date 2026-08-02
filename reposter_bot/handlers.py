@@ -11,14 +11,17 @@ from aiogram.types import Message
 
 from reposter_bot.config import Settings, parse_clock
 from reposter_bot.database import Database
+from reposter_bot.filters import BotIdFilter
 from reposter_bot.scheduling import next_slot
 from reposter_bot.workers import resolve_target_chat_id, runtime_schedule
 
 logger = logging.getLogger(__name__)
 
 
-def build_router(database: Database, settings: Settings) -> Router:
+def build_router(database: Database, settings: Settings, bot_id: int) -> Router:
     router = Router(name="reposter")
+    router.message.filter(BotIdFilter(bot_id))
+    router.channel_post.filter(BotIdFilter(bot_id))
 
     async def is_admin(message: Message) -> bool:
         if message.from_user is None:
