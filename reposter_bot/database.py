@@ -352,7 +352,7 @@ class Database:
             LEFT JOIN queue_media qm ON qm.item_id = qi.id
             WHERE qi.status = 'queued'
             GROUP BY qi.id
-            ORDER BY qi.id
+            ORDER BY qi.is_suggestion DESC, qi.id
             LIMIT ?
             """,
             (limit,),
@@ -692,7 +692,7 @@ class Database:
             connection = self._connection()
             cursor = await connection.execute(
                 "SELECT id, attempts, is_suggestion, text_content FROM queue_items "
-                "WHERE status = 'queued' ORDER BY id LIMIT 1"
+                "WHERE status = 'queued' ORDER BY is_suggestion DESC, id LIMIT 1"
             )
             row = await cursor.fetchone()
             await cursor.close()

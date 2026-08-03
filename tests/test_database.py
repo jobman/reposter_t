@@ -120,6 +120,38 @@ async def test_approved_text_suggestion_enters_shared_queue(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_approved_suggestion_has_priority_over_existing_regular_item(tmp_path) -> None:
+    database = Database(tmp_path / "queue.sqlite3")
+    await database.open()
+    try:
+        regular_item_id, _ = await database.add_single(1, 10, "photo", "regular")
+        suggestion_id = await database.create_suggestion(
+            submitter_user_id=42,
+            submitter_chat_id=42,
+            submitter_username=None,
+            submitter_name="Author",
+            source_message_id=100,
+            source_text="Приоритетное предложение",
+            media=None,
+        )
+        await database.begin_suggestion_approval(suggestion_id)
+        suggestion_item_id = await database.enqueue_approved_suggestion(suggestion_id, ())
+
+        first = await database.claim_next_item()
+        assert first is not None
+        assert first.id == suggestion_item_id
+        assert first.is_suggestion is True
+        await database.mark_published(first.id)
+
+        second = await database.claim_next_item()
+        assert second is not None
+        assert second.id == regular_item_id
+        assert second.is_suggestion is False
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
 async def test_decline_reason_is_bound_to_force_reply_prompt(tmp_path) -> None:
     database = Database(tmp_path / "queue.sqlite3")
     await database.open()
