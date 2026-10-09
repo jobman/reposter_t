@@ -71,7 +71,7 @@ def test_export_from_wrong_channel_is_rejected(tmp_path) -> None:
 async def test_resume_only_edits_unfinished_posts(monkeypatch, tmp_path) -> None:
     report = tmp_path / "report.json"
     report.write_text(json.dumps({"updated": [1], "unchanged": [], "failed": []}))
-    args = Namespace(resume=True, report=report, concurrency=3, chat_id=-100123)
+    args = Namespace(resume=True, report=report, concurrency=3, chat_id=-100123, interval=3.2)
     bot = AsyncMock()
     bot.get_chat.return_value = SimpleNamespace(type="channel")
     monkeypatch.setenv("BOT_TOKEN", "test-token")

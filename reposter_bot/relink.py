@@ -184,7 +184,7 @@ async def apply_changes(changes: list[tuple[dict, dict]], args: argparse.Namespa
             # RetryAfter can extend the deadline while another request waits.
             while next_request > loop.time():  # noqa: ASYNC110
                 await asyncio.sleep(next_request - loop.time())
-            next_request = loop.time() + 0.6
+            next_request = loop.time() + args.interval
 
     def checkpoint() -> None:
         temporary = args.report.with_suffix(".tmp")
@@ -263,10 +263,13 @@ def run() -> None:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--concurrency", type=int, default=3)
+    parser.add_argument("--interval", type=float, default=3.2)
     parser.add_argument("--report", type=Path, default=Path("link-update-report.json"))
     args = parser.parse_args()
     if not 1 <= args.concurrency <= 5:
         parser.error("--concurrency must be between 1 and 5")
+    if args.interval < 0.6:
+        parser.error("--interval must be at least 0.6 seconds")
     for url in (args.old_url, args.new_url):
         if urlparse(url).scheme != "https" or urlparse(url).netloc != "t.me":
             parser.error("Only HTTPS t.me URLs are supported")
