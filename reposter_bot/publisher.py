@@ -11,6 +11,7 @@ from aiogram.types import (
     InputMediaDocument,
     InputMediaPhoto,
     InputMediaVideo,
+    Message,
 )
 
 from reposter_bot.database import MediaRecord, QueueItem
@@ -37,21 +38,20 @@ class Publisher:
             return f"{self.base_footer}\n#предложка"
         return self.base_footer
 
-    async def publish(self, target_chat_id: int, item: QueueItem) -> None:
+    async def publish(self, target_chat_id: int, item: QueueItem) -> list[Message]:
         caption = self.footer(is_suggestion=item.is_suggestion)
         if not item.media:
             if not item.text_content:
                 raise ValueError(f"Queue item {item.id} has no content")
-            await self.bot.send_message(
+            message = await self.bot.send_message(
                 chat_id=target_chat_id,
                 text=f"{escape(item.text_content)}\n\n{caption}",
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
-            return
+            return [message]
         if len(item.media) == 1:
-            await self._send_single(target_chat_id, item.media[0], caption)
-            return
+            return [await self._send_single(target_chat_id, item.media[0], caption)]
 
         media_group = []
         for index, media in enumerate(item.media):
@@ -78,7 +78,7 @@ class Publisher:
                 )
             else:
                 raise ValueError(f"Unsupported media kind in album: {media.kind}")
-        await self.bot.send_media_group(chat_id=target_chat_id, media=media_group)
+        return await self.bot.send_media_group(chat_id=target_chat_id, media=media_group)
 
     @staticmethod
     def _media_value(media: MediaRecord) -> str | FSInputFile:
@@ -86,7 +86,7 @@ class Publisher:
             return FSInputFile(Path(media.local_path))
         return media.file_id
 
-    async def _send_single(self, target_chat_id: int, media: MediaRecord, caption: str) -> None:
+    async def _send_single(self, target_chat_id: int, media: MediaRecord, caption: str) -> Message:
         common = {
             "chat_id": target_chat_id,
             "caption": caption,
@@ -94,14 +94,14 @@ class Publisher:
         }
         media_value = self._media_value(media)
         if media.kind == "photo":
-            await self.bot.send_photo(photo=media_value, **common)
+            return await self.bot.send_photo(photo=media_value, **common)
         elif media.kind == "video":
-            await self.bot.send_video(video=media_value, **common)
+            return await self.bot.send_video(video=media_value, **common)
         elif media.kind == "animation":
-            await self.bot.send_animation(animation=media_value, **common)
+            return await self.bot.send_animation(animation=media_value, **common)
         elif media.kind == "document":
-            await self.bot.send_document(document=media_value, **common)
+            return await self.bot.send_document(document=media_value, **common)
         elif media.kind == "audio":
-            await self.bot.send_audio(audio=media_value, **common)
+            return await self.bot.send_audio(audio=media_value, **common)
         else:
             raise ValueError(f"Unsupported media kind: {media.kind}")

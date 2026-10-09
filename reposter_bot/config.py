@@ -72,7 +72,7 @@ class Settings:
         if not 1 <= posts_per_window <= 100:
             raise ValueError("POSTS_PER_WINDOW must be between 1 and 100")
 
-        join_url = os.getenv("JOIN_URL", "https://t.me/+Ucj6avweaLNmMDNi").strip()
+        join_url = os.getenv("JOIN_URL", "https://t.me/+tBVKx_7hKYIzMzgy").strip()
         if not join_url.startswith(("https://t.me/", "http://t.me/")):
             raise ValueError("JOIN_URL must be a Telegram HTTP(S) URL")
         link_text = os.getenv("LINK_TEXT", "Toy 🖤").strip()

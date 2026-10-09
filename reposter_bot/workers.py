@@ -102,7 +102,7 @@ async def scheduler_worker(
                 continue
 
             try:
-                await publisher.publish(target_chat_id, item)
+                published_messages = await publisher.publish(target_chat_id, item)
             except Exception as exc:
                 logger.exception("Publication failed for queue item %s", item.id)
                 await database.mark_publish_failed(item.id, str(exc))
@@ -110,6 +110,12 @@ async def scheduler_worker(
             else:
                 await database.mark_published(item.id)
                 await database.finish_slot(slot.key, "published", item.id)
+                for published_message in published_messages:
+                    await database.save_channel_message(
+                        published_message.chat.id,
+                        published_message.message_id,
+                        published_message.model_dump_json(exclude_none=True),
+                    )
                 cleanup_local_media(item)
                 logger.info("Published queue item %s to chat %s", item.id, target_chat_id)
         except asyncio.CancelledError:

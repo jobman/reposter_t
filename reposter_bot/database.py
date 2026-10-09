@@ -65,6 +65,14 @@ class Database:
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS channel_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, message_id)
+            );
+
             CREATE TABLE IF NOT EXISTS queue_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_chat_id INTEGER NOT NULL,
@@ -196,6 +204,16 @@ class Database:
                 "INSERT INTO settings(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (key, value),
+            )
+            await self._connection().commit()
+
+    async def save_channel_message(self, chat_id: int, message_id: int, snapshot_json: str) -> None:
+        async with self._write_lock:
+            await self._connection().execute(
+                "INSERT INTO channel_messages(chat_id, message_id, snapshot_json, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(chat_id, message_id) DO UPDATE SET "
+                "snapshot_json = excluded.snapshot_json, updated_at = excluded.updated_at",
+                (chat_id, message_id, snapshot_json, utc_now_text()),
             )
             await self._connection().commit()
 

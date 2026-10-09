@@ -37,9 +37,18 @@ def build_router(database: Database, settings: Settings, bot_id: int) -> Router:
 
     @router.channel_post()
     async def discover_channel(message: Message) -> None:
+        await database.save_channel_message(
+            message.chat.id, message.message_id, message.model_dump_json(exclude_none=True)
+        )
         await database.set_setting("last_discovered_channel_id", str(message.chat.id))
         await database.set_setting("last_discovered_channel_title", message.chat.title or "")
         logger.info("Discovered channel %s (%s)", message.chat.id, message.chat.title or "untitled")
+
+    @router.edited_channel_post(BotIdFilter(bot_id))
+    async def remember_edited_channel_post(message: Message) -> None:
+        await database.save_channel_message(
+            message.chat.id, message.message_id, message.model_dump_json(exclude_none=True)
+        )
 
     @router.message(Command("start"), F.chat.type == "private")
     async def start(message: Message) -> None:
