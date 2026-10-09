@@ -13,7 +13,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.types import LinkPreviewOptions
 
 FOOTER = re.compile(r"(?:Toy 🖤|join)(?: \| Предложка)?(?:\n#предложка)?\s*\Z")
@@ -162,13 +168,35 @@ async def apply_changes(changes: list[tuple[dict, dict]], args: argparse.Namespa
         raise ValueError("BOT_TOKEN is required for --apply")
     bot = Bot(token)
     result = {"updated": [], "unchanged": [], "failed": []}
-    try:
-        chat = await bot.get_chat(args.chat_id)
-        if chat.type != "channel":
-            raise ValueError("Target chat is not a channel")
-        for _, updated in changes:
+    if args.resume and args.report.exists():
+        result = json.loads(args.report.read_text(encoding="utf-8"))
+        result["failed"] = []
+    completed = set(result["updated"]) | set(result["unchanged"])
+    pending = [updated for _, updated in changes if updated["message_id"] not in completed]
+    throttle_lock = asyncio.Lock()
+    next_request = 0.0
+    semaphore = asyncio.Semaphore(args.concurrency)
+    loop = asyncio.get_running_loop()
+
+    async def throttle() -> None:
+        nonlocal next_request
+        async with throttle_lock:
+            # RetryAfter can extend the deadline while another request waits.
+            while next_request > loop.time():  # noqa: ASYNC110
+                await asyncio.sleep(next_request - loop.time())
+            next_request = loop.time() + 0.6
+
+    def checkpoint() -> None:
+        temporary = args.report.with_suffix(".tmp")
+        temporary.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(args.report)
+
+    async def edit_one(updated: dict) -> None:
+        nonlocal next_request
+        async with semaphore:
             message_id = updated["message_id"]
             for attempt in range(4):
+                await throttle()
                 try:
                     if "caption" in updated:
                         await bot.edit_message_caption(
@@ -195,17 +223,29 @@ async def apply_changes(changes: list[tuple[dict, dict]], args: argparse.Namespa
                     if attempt == 3:
                         result["failed"].append({"id": message_id, "error": "Rate limit"})
                     else:
-                        await asyncio.sleep(exc.retry_after + 1)
+                        next_request = max(next_request, loop.time() + exc.retry_after + 1)
                 except TelegramBadRequest as exc:
                     if "message is not modified" in exc.message.lower():
                         result["unchanged"].append(message_id)
                     else:
                         result["failed"].append({"id": message_id, "error": exc.message})
                     break
-            args.report.write_text(
-                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            await asyncio.sleep(0.5)
+                except (TelegramNetworkError, TelegramServerError) as exc:
+                    if attempt == 3:
+                        result["failed"].append({"id": message_id, "error": type(exc).__name__})
+                    else:
+                        await asyncio.sleep(2**attempt)
+                except TelegramAPIError as exc:
+                    result["failed"].append({"id": message_id, "error": exc.message})
+                    break
+            checkpoint()
+
+    try:
+        chat = await bot.get_chat(args.chat_id)
+        if chat.type != "channel":
+            raise ValueError("Target chat is not a channel")
+        await asyncio.gather(*(edit_one(updated) for updated in pending))
+        checkpoint()
     finally:
         await bot.session.close()
     return result
@@ -221,8 +261,12 @@ def run() -> None:
     parser.add_argument("--old-url", required=True)
     parser.add_argument("--new-url", required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--concurrency", type=int, default=3)
     parser.add_argument("--report", type=Path, default=Path("link-update-report.json"))
     args = parser.parse_args()
+    if not 1 <= args.concurrency <= 5:
+        parser.error("--concurrency must be between 1 and 5")
     for url in (args.old_url, args.new_url):
         if urlparse(url).scheme != "https" or urlparse(url).netloc != "t.me":
             parser.error("Only HTTPS t.me URLs are supported")
@@ -242,16 +286,21 @@ def run() -> None:
     if not args.apply:
         return
     backup = args.report.with_suffix(".backup.json")
-    if backup.exists():
+    if backup.exists() and not args.resume:
         raise ValueError("Backup already exists; choose a new --report path")
-    backup.write_text(
-        json.dumps(
-            {"created_at": datetime.now(UTC).isoformat(), "changes": changes},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    if backup.exists():
+        saved = json.loads(backup.read_text(encoding="utf-8"))
+        if saved["changes"] != [[original, updated] for original, updated in changes]:
+            raise ValueError("Cannot resume: migration plan differs from the backup")
+    else:
+        backup.write_text(
+            json.dumps(
+                {"created_at": datetime.now(UTC).isoformat(), "changes": changes},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     backup.chmod(0o600)
     result = asyncio.run(apply_changes(changes, args))
     print(json.dumps({key: len(value) for key, value in result.items()}))

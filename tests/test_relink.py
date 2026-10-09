@@ -1,8 +1,11 @@
 import json
+from argparse import Namespace
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from reposter_bot.relink import export_message, load_export, replacement
+from reposter_bot.relink import apply_changes, export_message, load_export, replacement
 
 OLD = "https://t.me/+Ucj6avweaLNmMDNi"
 NEW = "https://t.me/+tBVKx_7hKYIzMzgy"
@@ -62,3 +65,24 @@ def test_export_from_wrong_channel_is_rejected(tmp_path) -> None:
     path.write_text(json.dumps({"type": "private_channel", "id": 999, "messages": []}))
     with pytest.raises(ValueError, match="different channel"):
         load_export(path, -100123)
+
+
+@pytest.mark.asyncio
+async def test_resume_only_edits_unfinished_posts(monkeypatch, tmp_path) -> None:
+    report = tmp_path / "report.json"
+    report.write_text(json.dumps({"updated": [1], "unchanged": [], "failed": []}))
+    args = Namespace(resume=True, report=report, concurrency=3, chat_id=-100123)
+    bot = AsyncMock()
+    bot.get_chat.return_value = SimpleNamespace(type="channel")
+    monkeypatch.setenv("BOT_TOKEN", "test-token")
+    monkeypatch.setattr("reposter_bot.relink.Bot", lambda token: bot)
+    changes = [
+        ({}, {"message_id": mid, "caption": "Toy 🖤", "caption_entities": []}) for mid in (1, 2)
+    ]
+
+    result = await apply_changes(changes, args)
+
+    bot.edit_message_caption.assert_awaited_once()
+    assert bot.edit_message_caption.await_args.kwargs["message_id"] == 2
+    assert result == {"updated": [1, 2], "unchanged": [], "failed": []}
+    assert json.loads(report.read_text()) == result
